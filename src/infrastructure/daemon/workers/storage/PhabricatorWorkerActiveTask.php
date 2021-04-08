@@ -116,6 +116,7 @@ final class PhabricatorWorkerActiveTask extends PhabricatorWorkerTask {
       ->setDataID($this->getDataID())
       ->setPriority($this->getPriority())
       ->setObjectPHID($this->getObjectPHID())
+      ->setContainerPHID($this->getContainerPHID())
       ->setResult($result)
       ->setDuration($duration)
       ->setDateCreated($this->getDateCreated())
@@ -134,6 +135,7 @@ final class PhabricatorWorkerActiveTask extends PhabricatorWorkerTask {
 
     $did_succeed = false;
     $worker = null;
+    $caught = null;
     try {
       $worker = $this->getWorkerInstance();
       $worker->setCurrentWorkerTask($this);
@@ -180,6 +182,12 @@ final class PhabricatorWorkerActiveTask extends PhabricatorWorkerTask {
 
       $result = $this;
     } catch (Exception $ex) {
+      $caught = $ex;
+    } catch (Throwable $ex) {
+      $caught = $ex;
+    }
+
+    if ($caught) {
       $this->setExecutionException($ex);
       $this->setFailureCount($this->getFailureCount() + 1);
       $this->setFailureTime(time());

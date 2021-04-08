@@ -100,9 +100,17 @@ final class PhabricatorConduitAPIController
       }
     } catch (Exception $ex) {
       $result = null;
-      $error_code = ($ex instanceof ConduitException
-        ? 'ERR-CONDUIT-CALL'
-        : 'ERR-CONDUIT-CORE');
+
+      if ($ex instanceof ConduitException) {
+        $error_code = 'ERR-CONDUIT-CALL';
+      } else {
+        $error_code = 'ERR-CONDUIT-CORE';
+
+        // See T13581. When a Conduit method raises an uncaught exception
+        // other than a "ConduitException", log it.
+        phlog($ex);
+      }
+
       $error_info = $ex->getMessage();
     }
 
@@ -134,9 +142,17 @@ final class PhabricatorConduitAPIController
           $method_implementation);
       case 'json':
       default:
-        return id(new AphrontJSONResponse())
+        $response = id(new AphrontJSONResponse())
           ->setAddJSONShield(false)
           ->setContent($response->toDictionary());
+
+        $capabilities = $this->getConduitCapabilities();
+        if ($capabilities) {
+          $capabilities = implode(' ', $capabilities);
+          $response->addHeader('X-Conduit-Capabilities', $capabilities);
+        }
+
+        return $response;
     }
   }
 
@@ -716,5 +732,14 @@ final class PhabricatorConduitAPIController
     return false;
   }
 
+  private function getConduitCapabilities() {
+    $capabilities = array();
+
+    if (AphrontRequestStream::supportsGzip()) {
+      $capabilities[] = 'gzip';
+    }
+
+    return $capabilities;
+  }
 
 }

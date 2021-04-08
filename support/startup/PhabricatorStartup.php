@@ -35,6 +35,7 @@
  * @task validation   Validation
  * @task ratelimit    Rate Limiting
  * @task phases       Startup Phase Timers
+ * @task request-path Request Path
  */
 final class PhabricatorStartup {
 
@@ -47,6 +48,7 @@ final class PhabricatorStartup {
   private static $phases;
 
   private static $limits = array();
+  private static $requestPath;
 
 
 /* -(  Accessing Request Information  )-------------------------------------- */
@@ -119,6 +121,7 @@ final class PhabricatorStartup {
     self::$phases = array();
 
     self::$accessLog = null;
+    self::$requestPath = null;
 
     static $registered;
     if (!$registered) {
@@ -140,9 +143,7 @@ final class PhabricatorStartup {
 
     self::normalizeInput();
 
-    self::verifyRewriteRules();
-
-    self::detectPostMaxSizeTriggered();
+    self::readRequestPath();
 
     self::beginOutputCapture();
   }
@@ -199,15 +200,12 @@ final class PhabricatorStartup {
       'include_path',
       $libraries_root.PATH_SEPARATOR.ini_get('include_path'));
 
-    @include_once $root.'libphutil/src/__phutil_library_init__.php';
-    if (!@constant('__LIBPHUTIL__')) {
+    $ok = @include_once $root.'arcanist/src/init/init-library.php';
+    if (!$ok) {
       self::didFatal(
-        "Unable to load libphutil. Put libphutil/ next to phabricator/, or ".
-        "update your PHP 'include_path' to include the parent directory of ".
-        "libphutil/.");
+        'Unable to load the "Arcanist" library. Put "arcanist/" next to '.
+        '"phabricator/" on disk.');
     }
-
-    phutil_load_library('arcanist/src');
 
     // Load Phabricator itself using the absolute path, so we never end up doing
     // anything surprising (loading index.php and libraries from different
@@ -396,6 +394,24 @@ final class PhabricatorStartup {
     // a UTF-8 locale we can encounter problems when launching subprocesses
     // which receive UTF-8 parameters in their command line argument list.
     @setlocale(LC_ALL, 'en_US.UTF-8');
+
+    $config_map = array(
+      // See PHI1894. Keep "args" in exception backtraces.
+      'zend.exception_ignore_args' => 0,
+
+      // See T13100. We'd like the regex engine to fail, rather than segfault,
+      // if handed a pathological regular expression.
+      'pcre.backtrack_limit' => 10000,
+      'pcre.recusion_limit' => 10000,
+
+      // NOTE: Arcanist applies a similar set of startup options for CLI
+      // environments in "init-script.php". Changes here may also be
+      // appropriate to apply there.
+    );
+
+    foreach ($config_map as $config_key => $config_value) {
+      ini_set($config_key, $config_value);
+    }
   }
 
 
@@ -517,12 +533,18 @@ final class PhabricatorStartup {
         "'{$required_version}'.");
     }
 
-    if (@get_magic_quotes_gpc()) {
-      self::didFatal(
-        "Your server is configured with PHP 'magic_quotes_gpc' enabled. This ".
-        "feature is 'highly discouraged' by PHP's developers and you must ".
-        "disable it to run Phabricator. Consult the PHP manual for ".
-        "instructions.");
+    if (function_exists('get_magic_quotes_gpc')) {
+      if (@get_magic_quotes_gpc()) {
+        self::didFatal(
+          'Your server is configured with the PHP language feature '.
+          '"magic_quotes_gpc" enabled.'.
+          "\n\n".
+          'This feature is "highly discouraged" by PHP\'s developers, and '.
+          'has been removed entirely in PHP8.'.
+          "\n\n".
+          'You must disable "magic_quotes_gpc" to run Phabricator. Consult '.
+          'the PHP manual for instructions.');
+      }
     }
 
     if (extension_loaded('apc')) {
@@ -551,17 +573,29 @@ final class PhabricatorStartup {
 
 
   /**
-   * @task validation
+   * @task request-path
    */
-  private static function verifyRewriteRules() {
+  private static function readRequestPath() {
+
+    // See T13575. The request path may be provided in:
+    //
+    //  - the "$_GET" parameter "__path__" (normal for Apache and nginx); or
+    //  - the "$_SERVER" parameter "REQUEST_URI" (normal for the PHP builtin
+    //    webserver).
+    //
+    // Locate it wherever it is, and store it for later use. Note that writing
+    // to "$_REQUEST" here won't always work, because later code may rebuild
+    // "$_REQUEST" from other sources.
+
     if (isset($_REQUEST['__path__']) && strlen($_REQUEST['__path__'])) {
+      self::setRequestPath($_REQUEST['__path__']);
       return;
     }
 
+    // Compatibility with PHP 5.4+ built-in web server.
     if (php_sapi_name() == 'cli-server') {
-      // Compatibility with PHP 5.4+ built-in web server.
-      $url = parse_url($_SERVER['REQUEST_URI']);
-      $_REQUEST['__path__'] = $url['path'];
+      $path = parse_url($_SERVER['REQUEST_URI']);
+      self::setRequestPath($path['path']);
       return;
     }
 
@@ -579,102 +613,28 @@ final class PhabricatorStartup {
     }
   }
 
+  /**
+   * @task request-path
+   */
+  public static function getRequestPath() {
+    $path = self::$requestPath;
+
+    if ($path === null) {
+      self::didFatal(
+        'Request attempted to access request path, but no request path is '.
+        'available for this request. You may be calling web request code '.
+        'from a non-request context, or your webserver may not be passing '.
+        'a request path to Phabricator in a format that it understands.');
+    }
+
+    return $path;
+  }
 
   /**
-   * Detect if this request has had its POST data stripped by exceeding the
-   * 'post_max_size' PHP configuration limit.
-   *
-   * PHP has a setting called 'post_max_size'. If a POST request arrives with
-   * a body larger than the limit, PHP doesn't generate $_POST but processes
-   * the request anyway, and provides no formal way to detect that this
-   * happened.
-   *
-   * We can still read the entire body out of `php://input`. However according
-   * to the documentation the stream isn't available for "multipart/form-data"
-   * (on nginx + php-fpm it appears that it is available, though, at least) so
-   * any attempt to generate $_POST would be fragile.
-   *
-   * @task validation
+   * @task request-path
    */
-  private static function detectPostMaxSizeTriggered() {
-    // If this wasn't a POST, we're fine.
-    if ($_SERVER['REQUEST_METHOD'] != 'POST') {
-      return;
-    }
-
-    // If "enable_post_data_reading" is off, we won't have $_POST and this
-    // condition is effectively impossible.
-    if (!ini_get('enable_post_data_reading')) {
-      return;
-    }
-
-    // If there's POST data, clearly we're in good shape.
-    if ($_POST) {
-      return;
-    }
-
-    // For HTML5 drag-and-drop file uploads, Safari submits the data as
-    // "application/x-www-form-urlencoded". For most files this generates
-    // something in POST because most files decode to some nonempty (albeit
-    // meaningless) value. However, some files (particularly small images)
-    // don't decode to anything. If we know this is a drag-and-drop upload,
-    // we can skip this check.
-    if (isset($_REQUEST['__upload__'])) {
-      return;
-    }
-
-    // PHP generates $_POST only for two content types. This routing happens
-    // in `main/php_content_types.c` in PHP. Normally, all forms use one of
-    // these content types, but some requests may not -- for example, Firefox
-    // submits files sent over HTML5 XMLHTTPRequest APIs with the Content-Type
-    // of the file itself. If we don't have a recognized content type, we
-    // don't need $_POST.
-    //
-    // NOTE: We use strncmp() because the actual content type may be something
-    // like "multipart/form-data; boundary=...".
-    //
-    // NOTE: Chrome sometimes omits this header, see some discussion in T1762
-    // and http://code.google.com/p/chromium/issues/detail?id=6800
-    $content_type = isset($_SERVER['CONTENT_TYPE'])
-      ? $_SERVER['CONTENT_TYPE']
-      : '';
-
-    $parsed_types = array(
-      'application/x-www-form-urlencoded',
-      'multipart/form-data',
-    );
-
-    $is_parsed_type = false;
-    foreach ($parsed_types as $parsed_type) {
-      if (strncmp($content_type, $parsed_type, strlen($parsed_type)) === 0) {
-        $is_parsed_type = true;
-        break;
-      }
-    }
-
-    if (!$is_parsed_type) {
-      return;
-    }
-
-    // Check for 'Content-Length'. If there's no data, we don't expect $_POST
-    // to exist.
-    $length = (int)$_SERVER['CONTENT_LENGTH'];
-    if (!$length) {
-      return;
-    }
-
-    // Time to fatal: we know this was a POST with data that should have been
-    // populated into $_POST, but it wasn't.
-
-    $config = ini_get('post_max_size');
-    self::didFatal(
-      "As received by the server, this request had a nonzero content length ".
-      "but no POST data.\n\n".
-      "Normally, this indicates that it exceeds the 'post_max_size' setting ".
-      "in the PHP configuration on the server. Increase the 'post_max_size' ".
-      "setting or reduce the size of the request.\n\n".
-      "Request size according to 'Content-Length' was '{$length}', ".
-      "'post_max_size' is set to '{$config}'.");
+  public static function setRequestPath($path) {
+    self::$requestPath = $path;
   }
 
 

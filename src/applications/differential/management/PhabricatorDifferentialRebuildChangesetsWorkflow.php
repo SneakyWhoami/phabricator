@@ -36,7 +36,8 @@ final class PhabricatorDifferentialRebuildChangesetsWorkflow
         throw new PhutilArgumentUsageException(
           pht(
             'Object "%s" specified by "--revision" must be a Differential '.
-            'revision.'));
+            'revision.',
+            $revision_identifier));
       }
     } else {
       $revision = id(new DifferentialRevisionQuery())
@@ -80,6 +81,7 @@ final class PhabricatorDifferentialRebuildChangesetsWorkflow
       }
 
       id(new DifferentialChangesetEngine())
+        ->setViewer($viewer)
         ->rebuildChangesets($changesets);
 
       foreach ($changesets as $changeset) {

@@ -11,6 +11,7 @@ abstract class PhabricatorWorkerTask extends PhabricatorWorkerDAO {
   protected $dataID;
   protected $priority;
   protected $objectPHID;
+  protected $containerPHID;
 
   private $data;
   private $executionException;
@@ -25,16 +26,20 @@ abstract class PhabricatorWorkerTask extends PhabricatorWorkerDAO {
         'failureTime' => 'epoch?',
         'priority' => 'uint32',
         'objectPHID' => 'phid?',
+        'containerPHID' => 'phid?',
       ),
       self::CONFIG_KEY_SCHEMA => array(
         'key_object' => array(
           'columns' => array('objectPHID'),
         ),
+        'key_container' => array(
+          'columns' => array('containerPHID'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
 
-  final public function setExecutionException(Exception $execution_exception) {
+  final public function setExecutionException($execution_exception) {
     $this->executionException = $execution_exception;
     return $this;
   }

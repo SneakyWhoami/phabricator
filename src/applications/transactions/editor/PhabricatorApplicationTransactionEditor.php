@@ -1389,7 +1389,7 @@ abstract class PhabricatorApplicationTransactionEditor
     return $xactions;
   }
 
-  final private function queuePublishing() {
+  private function queuePublishing() {
     $object = $this->publishableObject;
     $xactions = $this->publishableTransactions;
 
@@ -4207,7 +4207,7 @@ abstract class PhabricatorApplicationTransactionEditor
    * @return dict<string, wild> Serializable editor state.
    * @task workers
    */
-  final private function getWorkerState() {
+  private function getWorkerState() {
     $state = array();
     foreach ($this->getAutomaticStateProperties() as $property) {
       $state[$property] = $this->$property;
@@ -4336,7 +4336,7 @@ abstract class PhabricatorApplicationTransactionEditor
    * @return map<string, wild> Map of encoded values.
    * @task workers
    */
-  final private function encodeStateForStorage(
+  private function encodeStateForStorage(
     array $state,
     array $encodings) {
 
@@ -4382,7 +4382,7 @@ abstract class PhabricatorApplicationTransactionEditor
    * @return map<string, wild> Map of decoded values.
    * @task workers
    */
-  final private function decodeStateFromStorage(
+  private function decodeStateFromStorage(
     array $state,
     array $encodings) {
 
@@ -4968,24 +4968,43 @@ abstract class PhabricatorApplicationTransactionEditor
 
   private function hasWarnings($object, $xaction) {
     // TODO: For the moment, this is a very un-modular hack to support
-    // exactly one type of warning (mentioning users on a draft revision)
-    // that we want to show. See PHI433.
+    // a small number of warnings related to draft revisions. See PHI433.
 
     if (!($object instanceof DifferentialRevision)) {
       return false;
+    }
+
+    $type = $xaction->getTransactionType();
+
+    // TODO: This doesn't warn for inlines in Audit, even though they have
+    // the same overall workflow.
+    if ($type === DifferentialTransaction::TYPE_INLINE) {
+      return (bool)$xaction->getComment()->getAttribute('editing', false);
     }
 
     if (!$object->isDraft()) {
       return false;
     }
 
-    $type = $xaction->getTransactionType();
     if ($type != PhabricatorTransactions::TYPE_SUBSCRIBERS) {
       return false;
     }
 
-    // NOTE: This will currently warn even if you're only removing
-    // subscribers.
+    // We're only going to raise a warning if the transaction adds subscribers
+    // other than the acting user. (This implementation is clumsy because the
+    // code runs before a lot of normalization occurs.)
+
+    $old = $this->getTransactionOldValue($object, $xaction);
+    $new = $this->getPHIDTransactionNewValue($xaction, $old);
+    $old = array_fuse($old);
+    $new = array_fuse($new);
+    $add = array_diff_key($new, $old);
+
+    unset($add[$this->getActingAsPHID()]);
+
+    if (!$add) {
+      return false;
+    }
 
     return true;
   }
@@ -5020,13 +5039,23 @@ abstract class PhabricatorApplicationTransactionEditor
 
   public function newAutomaticInlineTransactions(
     PhabricatorLiskDAO $object,
-    array $inlines,
     $transaction_type,
     PhabricatorCursorPagedPolicyAwareQuery $query_template) {
 
+    $actor = $this->getActor();
+
+    $inlines = id(clone $query_template)
+      ->setViewer($actor)
+      ->withObjectPHIDs(array($object->getPHID()))
+      ->withPublishableComments(true)
+      ->needAppliedDrafts(true)
+      ->needReplyToComments(true)
+      ->execute();
+    $inlines = msort($inlines, 'getID');
+
     $xactions = array();
 
-    foreach ($inlines as $inline) {
+    foreach ($inlines as $key => $inline) {
       $xactions[] = $object->getApplicationTransactionTemplate()
         ->setTransactionType($transaction_type)
         ->attachComment($inline);
@@ -5053,24 +5082,17 @@ abstract class PhabricatorApplicationTransactionEditor
 
     $state_map = PhabricatorTransactions::getInlineStateMap();
 
-    $query = id(clone $query_template)
+    $inline_query = id(clone $query_template)
       ->setViewer($this->getActor())
-      ->withFixedStates(array_keys($state_map));
-
-    $inlines = array();
-
-    $inlines[] = id(clone $query)
-      ->withAuthorPHIDs(array($actor_phid))
-      ->withHasTransaction(false)
-      ->execute();
+      ->withObjectPHIDs(array($object->getPHID()))
+      ->withFixedStates(array_keys($state_map))
+      ->withPublishableComments(true);
 
     if ($actor_is_author) {
-      $inlines[] = id(clone $query)
-        ->withHasTransaction(true)
-        ->execute();
+      $inline_query->withPublishedComments(true);
     }
 
-    $inlines = array_mergev($inlines);
+    $inlines = $inline_query->execute();
 
     if (!$inlines) {
       return null;

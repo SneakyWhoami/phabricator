@@ -41,19 +41,55 @@ final class DiffusionLowLevelCommitQuery
   private function loadGitCommitRef() {
     $repository = $this->getRepository();
 
-    // NOTE: %B was introduced somewhat recently in git's history, so pull
-    // commit message information with %s and %b instead.
+    // See T5028. The "%B" (raw body) mode is not present in very old versions
+    // of Git. Use "%s" and "%b" ("subject" and "wrapped body") as an
+    // approximation.
+
+    $git_binary = PhutilBinaryAnalyzer::getForBinary('git');
+    $git_version = $git_binary->getBinaryVersion();
+    if (version_compare($git_version, '1.7.2', '>=')) {
+      $body_format = '%B';
+      $split_body = false;
+    } else {
+      $body_format = '%s%x00%b';
+      $split_body = true;
+    }
+
+    $argv = array();
+
+    $argv[] = '-n';
+    $argv[] = '1';
+
+    $argv[] = '--encoding=UTF-8';
+
+    $argv[] = sprintf(
+      '--format=%s',
+      implode(
+        '%x00',
+        array(
+          '%e',
+          '%cn',
+          '%ce',
+          '%an',
+          '%ae',
+          '%T',
+          '%at',
+          $body_format,
+
+          // The "git log" output includes a trailing newline. We want to
+          // faithfully capture only the exact text of the commit message,
+          // so include an explicit terminator: this makes sure the exact
+          // body text is surrounded by "\0" characters.
+          '~',
+        )));
 
     // Even though we pass --encoding here, git doesn't always succeed, so
     // we try a little harder, since git *does* tell us what the actual encoding
     // is correctly (unless it doesn't; encoding is sometimes empty).
     list($info) = $repository->execxLocalCommand(
-      'log -n 1 --encoding=%s --format=%s %s --',
-      'UTF-8',
-      implode(
-        '%x00',
-        array('%e', '%cn', '%ce', '%an', '%ae', '%T', '%at', '%s%n%n%b')),
-      $this->identifier);
+      'log -n 1 %Ls %s --',
+      $argv,
+      gitsprintf('%s', $this->identifier));
 
     $parts = explode("\0", $info);
     $encoding = array_shift($parts);
@@ -82,6 +118,28 @@ final class DiffusionLowLevelCommitQuery
       $author_epoch = null;
     }
 
+    if ($split_body) {
+      // Here, the body is: "subject", "\0", "wrapped body". Stitch the
+      // pieces back together by putting a newline between them if both
+      // parts are nonempty.
+
+      $head = $parts[6];
+      $tail = $parts[7];
+
+      if (strlen($head) && strlen($tail)) {
+        $body = $head."\n\n".$tail;
+      } else if (strlen($head)) {
+        $body = $head;
+      } else if (strlen($tail)) {
+        $body = $tail;
+      } else {
+        $body = '';
+      }
+    } else {
+      // Here, the body is the raw unwrapped body.
+      $body = $parts[6];
+    }
+
     return id(new DiffusionCommitRef())
       ->setCommitterName($parts[0])
       ->setCommitterEmail($parts[1])
@@ -89,7 +147,7 @@ final class DiffusionLowLevelCommitQuery
       ->setAuthorEmail($parts[3])
       ->setHashes($hashes)
       ->setAuthorEpoch($author_epoch)
-      ->setMessage($parts[6]);
+      ->setMessage($body);
   }
 
   private function loadMercurialCommitRef() {

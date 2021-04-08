@@ -128,6 +128,11 @@ final class HarbormasterBuild extends HarbormasterDAO
       'step.timestamp' => null,
       'build.id' => null,
       'initiator.phid' => null,
+
+      'buildable.phid' => null,
+      'buildable.object.phid' => null,
+      'buildable.container.phid' => null,
+      'build.phid' => null,
     );
 
     foreach ($this->getBuildParameters() as $key => $value) {
@@ -145,6 +150,11 @@ final class HarbormasterBuild extends HarbormasterDAO
     $results['build.id'] = $this->getID();
     $results['initiator.phid'] = $this->getInitiatorPHID();
 
+    $results['buildable.phid'] = $buildable->getPHID();
+    $results['buildable.object.phid'] = $object->getPHID();
+    $results['buildable.container.phid'] = $buildable->getContainerPHID();
+    $results['build.phid'] = $this->getPHID();
+
     return $results;
   }
 
@@ -161,6 +171,16 @@ final class HarbormasterBuild extends HarbormasterDAO
       'initiator.phid' => pht(
         'The PHID of the user or Object that initiated the build, '.
         'if applicable.'),
+      'buildable.phid' => pht(
+        'The object PHID of the Harbormaster Buildable being built.'),
+      'buildable.object.phid' => pht(
+        'The object PHID of the object (usually a diff or commit) '.
+        'being built.'),
+      'buildable.container.phid' => pht(
+        'The object PHID of the container (usually a revision or repository) '.
+        'for the object being built.'),
+      'build.phid' => pht(
+        'The object PHID of the Harbormaster Build being built.'),
     );
 
     foreach ($objects as $object) {
@@ -234,6 +254,16 @@ final class HarbormasterBuild extends HarbormasterDAO
 
     $restartable = HarbormasterBuildPlanBehavior::BEHAVIOR_RESTARTABLE;
     $plan = $this->getBuildPlan();
+
+    // See T13526. Users who can't see the "BuildPlan" can end up here with
+    // no object. This is highly questionable.
+    if (!$plan) {
+      throw new HarbormasterRestartException(
+        pht('No Build Plan Permission'),
+        pht(
+          'You can not restart this build because you do not have '.
+          'permission to access the build plan.'));
+    }
 
     $option = HarbormasterBuildPlanBehavior::getBehavior($restartable)
       ->getPlanOption($plan);
@@ -388,6 +418,12 @@ final class HarbormasterBuild extends HarbormasterDAO
 
   public function assertCanIssueCommand(PhabricatorUser $viewer, $command) {
     $plan = $this->getBuildPlan();
+
+    // See T13526. Users without permission to access the build plan can
+    // currently end up here with no "BuildPlan" object.
+    if (!$plan) {
+      return false;
+    }
 
     $need_edit = true;
     switch ($command) {
